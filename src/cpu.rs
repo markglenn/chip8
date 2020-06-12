@@ -8,18 +8,40 @@ const V_HEIGHT: usize = 32;
 const OPSIZE: usize = 2;
 
 pub struct Cpu {
+    // Address register
     i: usize,
+
+    // Program counter
     pc: usize,
+
+    // RAM
     ram: Ram,
+
+    // V registers
     v: [u8; 16],
+
+    // Video RAM
     pub vram: [[u8; V_WIDTH]; V_HEIGHT],
 
+    // Stack
     stack: [usize; 16],
+
+    // Stack pointer
     sp: u8,
+
+    // Delay timer
     dt: u8,
 
+    // Sound timer
+    st: u8,
+
+    // Key state
     keys: [bool; 16],
+
+    // Sleep while awaiting key press?
     awaiting_key: bool,
+
+    display_updated: bool,
 }
 
 enum ProgramCounter {
@@ -38,9 +60,11 @@ impl Cpu {
             stack: [0; 16],
             sp: 0,
             dt: 0,
+            st: 0,
             vram: [[0; V_WIDTH]; V_HEIGHT],
             keys: [false; 16],
             awaiting_key: false,
+            display_updated: false,
         }
     }
 
@@ -53,6 +77,21 @@ impl Cpu {
         }
 
         self.execute_opcode(opcode);
+
+        if self.display_updated {
+            print!("\x1B[0;0H");
+            for (_i, &row) in self.vram.iter().enumerate() {
+                for (_j, &char) in row.iter().enumerate() {
+                    if char > 0 {
+                        print!("#");
+                    } else {
+                        print!(" ");
+                    }
+                }
+                println!("");
+            }
+            self.display_updated = false;
+        }
     }
 
     pub fn load_cart(&mut self, contents: &Vec<u8>) {
@@ -97,6 +136,10 @@ impl Cpu {
             (0xB, _, _, _) => self.op_bnnn(nnn),
             (0xC, _, _, _) => self.op_cxnn(x, nn),
             (0xD, _, _, _) => self.op_dxyn(x, y, n),
+            (0xE, _, 0xA, 0x1) => self.op_exa1(x),
+            (0xF, _, 0x0, 0x7) => self.op_fx07(x),
+            (0xF, _, 0x1, 0x5) => self.op_fx15(x),
+            (0xF, _, 0x1, 0x8) => self.op_fx18(x),
             (0xF, _, 0x1, 0xe) => self.op_fx1e(x),
             (0xF, _, 0x2, 0x9) => self.op_fx29(x),
             (0xF, _, 0x3, 0x3) => self.op_fx33(x),
@@ -111,11 +154,13 @@ impl Cpu {
             ProgramCounter::Skip => self.pc += OPSIZE * 2,
         };
 
-        println!("PC: {:?}", nibbles);
+        // println!("PC: {:?}", nibbles);
     }
 
     // Clears the screen
     fn op_00e0(&mut self) -> ProgramCounter {
+        self.display_updated = true;
+
         for y in 0..V_HEIGHT {
             for x in 0..V_WIDTH {
                 self.vram[y][x] = 0;
@@ -292,6 +337,7 @@ impl Cpu {
     // doesn’t happen
     fn op_dxyn(&mut self, x: usize, y: usize, n: usize) -> ProgramCounter {
         self.v[0xF] = 0;
+        self.display_updated = true;
 
         for byte in 0..n {
             let y = (self.v[y] as usize + byte) % V_HEIGHT;
@@ -307,7 +353,34 @@ impl Cpu {
         ProgramCounter::Next
     }
 
-    // Adds VX to I. VF is set to 1 when there is a range overflow (I+VX>0xFFF), and to 0 when there isn't.
+    fn op_exa1(&mut self, x: usize) -> ProgramCounter {
+        if self.keys[x] {
+            ProgramCounter::Next
+        } else {
+            ProgramCounter::Skip
+        }
+    }
+
+    // Sets VX to the value of the delay timer
+    fn op_fx07(&mut self, x: usize) -> ProgramCounter {
+        self.v[x] = self.dt;
+        ProgramCounter::Next
+    }
+
+    // Sets the delay timer to VX
+    fn op_fx15(&mut self, x: usize) -> ProgramCounter {
+        self.dt = self.v[x];
+        ProgramCounter::Next
+    }
+
+    // Sets the sound timer to VX.
+    fn op_fx18(&mut self, x: usize) -> ProgramCounter {
+        self.st = self.v[x];
+        ProgramCounter::Next
+    }
+
+    // Adds VX to I. VF is set to 1 when there is a range overflow (I+VX>0xFFF),
+    // and to 0 when there isn't.
     fn op_fx1e(&mut self, x: usize) -> ProgramCounter {
         let result = self.i + self.v[x] as usize;
         self.i = result & 0xFFF as usize;
