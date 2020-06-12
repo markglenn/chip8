@@ -22,6 +22,7 @@ pub struct Cpu {
 
     // Video RAM
     pub vram: [[u8; V_WIDTH]; V_HEIGHT],
+    pub display_updated: bool,
 
     // Stack
     stack: [usize; 16],
@@ -35,13 +36,10 @@ pub struct Cpu {
     // Sound timer
     st: u8,
 
-    // Key state
-    keys: [bool; 16],
-
     // Sleep while awaiting key press?
     awaiting_key: bool,
 
-    display_updated: bool,
+    keypad_register: usize,
 }
 
 enum ProgramCounter {
@@ -62,42 +60,45 @@ impl Cpu {
             dt: 0,
             st: 0,
             vram: [[0; V_WIDTH]; V_HEIGHT],
-            keys: [false; 16],
             awaiting_key: false,
             display_updated: false,
+            keypad_register: 0,
         }
     }
 
-    pub fn execute_cycle(&mut self) {
+    pub fn execute_cycle(&mut self, keypad: &[bool; 16]) {
         let opcode = self.ram.read_word(self.pc);
 
-        // Update the delay timer
-        if self.dt > 0 {
-            self.dt -= 1;
+        self.display_updated = false;
+
+        if self.awaiting_key {
+            for i in 0..keypad.len() {
+                if keypad[i] {
+                    self.awaiting_key = false;
+                    self.v[self.keypad_register] = i as u8;
+                    break;
+                }
+            }
         }
 
-        self.execute_opcode(opcode);
-
-        if self.display_updated {
-            print!("\x1B[0;0H");
-            for (_i, &row) in self.vram.iter().enumerate() {
-                for (_j, &char) in row.iter().enumerate() {
-                    if char > 0 {
-                        print!("#");
-                    } else {
-                        print!(" ");
-                    }
-                }
-                println!("");
+        if !self.awaiting_key {
+            // Update the delay timer
+            if self.dt > 0 {
+                self.dt -= 1;
             }
-            self.display_updated = false;
+
+            if self.st > 0 {
+                self.st -= 1;
+            }
+
+            self.execute_opcode(opcode, keypad);
         }
     }
 
     pub fn load_cart(&mut self, contents: &Vec<u8>) {
         self.ram.load_block(0x200, contents);
     }
-    fn execute_opcode(&mut self, opcode: u16) {
+    fn execute_opcode(&mut self, opcode: u16, keypad: &[bool; 16]) {
         let nibbles = (
             (opcode & 0xF000) >> 12,
             (opcode & 0x0F00) >> 8,
@@ -136,8 +137,10 @@ impl Cpu {
             (0xB, _, _, _) => self.op_bnnn(nnn),
             (0xC, _, _, _) => self.op_cxnn(x, nn),
             (0xD, _, _, _) => self.op_dxyn(x, y, n),
-            (0xE, _, 0xA, 0x1) => self.op_exa1(x),
+            (0xE, _, 0x9, 0xE) => self.op_ex9e(x, keypad),
+            (0xE, _, 0xA, 0x1) => self.op_exa1(x, keypad),
             (0xF, _, 0x0, 0x7) => self.op_fx07(x),
+            (0xF, _, 0x0, 0xA) => self.op_fx0a(x),
             (0xF, _, 0x1, 0x5) => self.op_fx15(x),
             (0xF, _, 0x1, 0x8) => self.op_fx18(x),
             (0xF, _, 0x1, 0xe) => self.op_fx1e(x),
@@ -353,8 +356,20 @@ impl Cpu {
         ProgramCounter::Next
     }
 
-    fn op_exa1(&mut self, x: usize) -> ProgramCounter {
-        if self.keys[x] {
+    // Skips the next instruction if the key stored in VX is pressed. (Usually
+    // the next instruction is a jump to skip a code block)
+    fn op_ex9e(&mut self, x: usize, keypad: &[bool; 16]) -> ProgramCounter {
+        if keypad[self.v[x] as usize] {
+            ProgramCounter::Skip
+        } else {
+            ProgramCounter::Next
+        }
+    }
+
+    // Skips the next instruction if the key stored in VX isn't pressed.
+    // (Usually the next instruction is a jump to skip a code block)
+    fn op_exa1(&mut self, x: usize, keypad: &[bool; 16]) -> ProgramCounter {
+        if keypad[self.v[x] as usize] {
             ProgramCounter::Next
         } else {
             ProgramCounter::Skip
@@ -364,6 +379,12 @@ impl Cpu {
     // Sets VX to the value of the delay timer
     fn op_fx07(&mut self, x: usize) -> ProgramCounter {
         self.v[x] = self.dt;
+        ProgramCounter::Next
+    }
+
+    fn op_fx0a(&mut self, x: usize) -> ProgramCounter {
+        self.awaiting_key = true;
+        self.keypad_register = x;
         ProgramCounter::Next
     }
 
